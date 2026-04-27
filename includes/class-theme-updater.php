@@ -30,11 +30,11 @@ class Theme_Updater {
 	protected $manual_upgrade_theme_id = '';
 
 	/**
-	 * Theme ID currently being checked through a manual "check now" action.
+	 * Temporary .git backups keyed by theme stylesheet.
 	 *
-	 * @var string
+	 * @var array<string, string>
 	 */
-	protected static $manual_check_theme_id = '';
+	protected $preserved_git_directories = array();
 
 	/**
 	 * Constructor.
@@ -56,6 +56,8 @@ class Theme_Updater {
 		add_filter( 'pre_set_site_transient_update_themes', array( $this, 'inject_update' ) );
 		add_filter( 'themes_api', array( $this, 'filter_themes_api' ), 10, 3 );
 		add_filter( 'upgrader_pre_download', array( $this, 'filter_pre_download' ), 10, 4 );
+		add_filter( 'upgrader_pre_install', array( $this, 'preserve_git_directory_before_install' ), 5, 2 );
+		add_filter( 'upgrader_post_install', array( $this, 'restore_git_directory_after_install' ), 5, 3 );
 		add_filter( 'upgrader_source_selection', array( $this, 'normalize_package_source' ), 5, 4 );
 	}
 
@@ -108,18 +110,6 @@ class Theme_Updater {
 
 			$item              = $this->build_update_item( $remote, $stylesheet );
 			$installed_version = (string) $theme->get( 'Version' );
-
-			if ( '' === self::$manual_check_theme_id || self::$manual_check_theme_id === $configured_theme['id'] ) {
-				$this->settings->update_theme_runtime_state(
-					$configured_theme['id'],
-					array(
-						'last_action'            => 'checked',
-						'last_checked_at'        => current_time( 'mysql' ),
-						'last_installed_version' => $installed_version,
-						'last_remote_version'    => (string) $remote['version'],
-					)
-				);
-			}
 
 			if ( '' !== $installed_version && version_compare( $remote['version'], $installed_version, '>' ) ) {
 				$transient->response[ $stylesheet ] = $item;
@@ -319,10 +309,12 @@ class Theme_Updater {
 		$this->manual_upgrade_theme_id = '';
 
 		if ( is_wp_error( $result ) ) {
+			$this->restore_preserved_git_directory( $stylesheet );
 			return $result;
 		}
 
 		if ( false === $result ) {
+			$this->restore_preserved_git_directory( $stylesheet );
 			return new WP_Error(
 				'github_theme_updater_upgrade_failed',
 				__( 'The theme upgrade could not be completed from GitHub.', 'github-theme-updater' )
@@ -330,19 +322,8 @@ class Theme_Updater {
 		}
 
 		$this->settings->clear_cache( array( $theme_id ) );
-
 		$updated_theme = wp_get_theme( $stylesheet );
 		$installed     = (string) $updated_theme->get( 'Version' );
-
-		$this->settings->update_theme_runtime_state(
-			$theme_id,
-			array(
-				'last_action'            => 'updated',
-				'last_checked_at'        => current_time( 'mysql' ),
-				'last_installed_version' => $installed,
-				'last_remote_version'    => (string) $remote['version'],
-			)
-		);
 
 		return array(
 			'theme_name'        => $updated_theme->get( 'Name' ) ? $updated_theme->get( 'Name' ) : $stylesheet,
@@ -392,21 +373,9 @@ class Theme_Updater {
 		}
 
 		$this->settings->clear_cache( array( $theme_id ) );
-		self::$manual_check_theme_id = $theme_id;
 		wp_update_themes();
-		self::$manual_check_theme_id = '';
 
 		$installed_version = (string) $theme->get( 'Version' );
-
-		$this->settings->update_theme_runtime_state(
-			$theme_id,
-			array(
-				'last_action'            => 'checked',
-				'last_checked_at'        => current_time( 'mysql' ),
-				'last_installed_version' => $installed_version,
-				'last_remote_version'    => (string) $remote['version'],
-			)
-		);
 
 		return array(
 			'theme_name'        => $theme->get( 'Name' ) ? $theme->get( 'Name' ) : $stylesheet,
@@ -443,10 +412,12 @@ class Theme_Updater {
 		$this->manual_upgrade_theme_id = '';
 
 		if ( is_wp_error( $result ) ) {
+			$this->restore_preserved_git_directory( $remote['stylesheet'] );
 			return $result;
 		}
 
 		if ( false === $result ) {
+			$this->restore_preserved_git_directory( $remote['stylesheet'] );
 			return new WP_Error(
 				'github_theme_updater_install_failed',
 				__( 'The theme could not be installed from GitHub.', 'github-theme-updater' )
@@ -458,16 +429,6 @@ class Theme_Updater {
 
 		$installed_theme = wp_get_theme( $remote['stylesheet'] );
 		$installed       = (string) $installed_theme->get( 'Version' );
-
-		$this->settings->update_theme_runtime_state(
-			$theme_id,
-			array(
-				'last_action'            => 'installed',
-				'last_checked_at'        => current_time( 'mysql' ),
-				'last_installed_version' => $installed,
-				'last_remote_version'    => (string) $remote['version'],
-			)
-		);
 
 		return array(
 			'theme_name'        => $installed_theme->get( 'Name' ) ? $installed_theme->get( 'Name' ) : $remote['name'],
@@ -540,5 +501,178 @@ class Theme_Updater {
 		}
 
 		return $this->manual_upgrade_theme_id;
+	}
+
+	/**
+	 * Preserve the existing .git directory before WordPress clears the theme directory.
+	 *
+	 * @param bool|WP_Error        $response   Installation response.
+	 * @param array<string, mixed> $hook_extra Hook metadata.
+	 * @return bool|WP_Error
+	 */
+	public function preserve_git_directory_before_install( $response, array $hook_extra ) {
+		global $wp_filesystem;
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		if ( empty( $hook_extra['type'] ) || 'theme' !== $hook_extra['type'] ) {
+			return $response;
+		}
+
+		$stylesheet = $this->resolve_hook_theme_stylesheet( $hook_extra );
+		if ( '' === $stylesheet || isset( $this->preserved_git_directories[ $stylesheet ] ) ) {
+			return $response;
+		}
+
+		if ( ! $wp_filesystem ) {
+			return $response;
+		}
+
+		$theme_root = $wp_filesystem->find_folder( get_theme_root( $stylesheet ) );
+		if ( ! $theme_root ) {
+			return $response;
+		}
+
+		$git_directory = trailingslashit( $theme_root ) . $stylesheet . '/.git';
+		if ( ! $wp_filesystem->exists( $git_directory ) || ! $wp_filesystem->is_dir( $git_directory ) ) {
+			return $response;
+		}
+
+		$backup_root = trailingslashit( $wp_filesystem->wp_content_dir() ) . 'upgrade-temp-backup/github-theme-updater/';
+		if ( ! $wp_filesystem->is_dir( $backup_root ) && ! $wp_filesystem->mkdir( $backup_root, FS_CHMOD_DIR ) ) {
+			return new WP_Error(
+				'github_theme_updater_git_backup_dir_failed',
+				__( 'Could not create a temporary backup directory for the theme Git repository.', 'github-theme-updater' )
+			);
+		}
+
+		$backup_directory = trailingslashit( $backup_root ) . $stylesheet . '-' . wp_generate_password( 8, false, false ) . '/.git';
+		$backup_parent    = dirname( $backup_directory );
+
+		if ( ! $wp_filesystem->is_dir( $backup_parent ) && ! $wp_filesystem->mkdir( $backup_parent, FS_CHMOD_DIR ) ) {
+			return new WP_Error(
+				'github_theme_updater_git_backup_parent_failed',
+				__( 'Could not prepare a temporary backup location for the theme Git repository.', 'github-theme-updater' )
+			);
+		}
+
+		$copy_result = copy_dir( $git_directory, $backup_directory );
+		if ( is_wp_error( $copy_result ) ) {
+			return new WP_Error(
+				'github_theme_updater_git_backup_failed',
+				__( 'Could not back up the theme Git repository before the update started.', 'github-theme-updater' )
+			);
+		}
+
+		$this->preserved_git_directories[ $stylesheet ] = $backup_directory;
+
+		return $response;
+	}
+
+	/**
+	 * Restore the preserved .git directory after the theme was installed.
+	 *
+	 * @param bool|WP_Error        $response   Installation response.
+	 * @param array<string, mixed> $hook_extra Hook metadata.
+	 * @param array<string, mixed> $result     Installation result.
+	 * @return bool|WP_Error
+	 */
+	public function restore_git_directory_after_install( $response, array $hook_extra, array $result ) {
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		if ( empty( $hook_extra['type'] ) || 'theme' !== $hook_extra['type'] ) {
+			return $response;
+		}
+
+		$stylesheet = '';
+
+		if ( ! empty( $result['destination_name'] ) ) {
+			$stylesheet = sanitize_key( $result['destination_name'] );
+		}
+
+		if ( '' === $stylesheet ) {
+			$stylesheet = $this->resolve_hook_theme_stylesheet( $hook_extra );
+		}
+
+		if ( '' !== $stylesheet ) {
+			$this->restore_preserved_git_directory( $stylesheet, isset( $result['destination'] ) ? (string) $result['destination'] : '' );
+		}
+
+		return $response;
+	}
+
+	/**
+	 * Restore a preserved .git directory for one stylesheet.
+	 *
+	 * @param string $stylesheet       Theme stylesheet.
+	 * @param string $destination_path Installed theme destination.
+	 * @return void
+	 */
+	protected function restore_preserved_git_directory( $stylesheet, $destination_path = '' ) {
+		global $wp_filesystem;
+
+		$stylesheet = sanitize_key( $stylesheet );
+
+		if ( '' === $stylesheet || empty( $this->preserved_git_directories[ $stylesheet ] ) || ! $wp_filesystem ) {
+			return;
+		}
+
+		$backup_directory = $this->preserved_git_directories[ $stylesheet ];
+		$theme_directory  = '' !== $destination_path
+			? untrailingslashit( $destination_path )
+			: trailingslashit( $wp_filesystem->find_folder( get_theme_root( $stylesheet ) ) ) . $stylesheet;
+
+		$git_directory = trailingslashit( $theme_directory ) . '.git';
+
+		if ( ! $wp_filesystem->is_dir( $theme_directory ) ) {
+			return;
+		}
+
+		if ( ! $wp_filesystem->exists( $git_directory ) ) {
+			$restore_result = copy_dir( $backup_directory, $git_directory );
+			if ( is_wp_error( $restore_result ) ) {
+				return;
+			}
+		}
+
+		$wp_filesystem->delete( dirname( $backup_directory ), true );
+		unset( $this->preserved_git_directories[ $stylesheet ] );
+	}
+
+	/**
+	 * Resolve the affected theme stylesheet from upgrader hook metadata.
+	 *
+	 * @param array<string, mixed> $hook_extra Hook metadata.
+	 * @return string
+	 */
+	protected function resolve_hook_theme_stylesheet( array $hook_extra ) {
+		if ( ! empty( $hook_extra['theme'] ) ) {
+			return sanitize_key( $hook_extra['theme'] );
+		}
+
+		$theme_id = $this->resolve_upgrade_theme_id( $hook_extra );
+		if ( '' === $theme_id ) {
+			return '';
+		}
+
+		$config = $this->settings->get_theme( $theme_id );
+		if ( ! is_array( $config ) ) {
+			return '';
+		}
+
+		if ( ! empty( $config['theme_stylesheet'] ) ) {
+			return sanitize_key( $config['theme_stylesheet'] );
+		}
+
+		$remote = $this->client->get_remote_theme_data( $theme_id );
+		if ( is_wp_error( $remote ) ) {
+			return '';
+		}
+
+		return sanitize_key( $this->client->resolve_target_stylesheet( $config, $remote ) );
 	}
 }

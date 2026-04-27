@@ -67,12 +67,12 @@ class Admin_Page {
 	}
 
 	/**
-	 * Register the settings page.
+	 * Register the admin page under Appearance.
 	 *
 	 * @return void
 	 */
 	public function register_menu() {
-		add_options_page(
+		add_theme_page(
 			__( 'GitHub Theme Updater', 'github-theme-updater' ),
 			__( 'GitHub Theme Updater', 'github-theme-updater' ),
 			'manage_options',
@@ -135,7 +135,6 @@ class Admin_Page {
 							<span><?php esc_html_e( 'Theme', 'github-theme-updater' ); ?></span>
 							<span><?php esc_html_e( 'Status', 'github-theme-updater' ); ?></span>
 							<span><?php esc_html_e( 'Versions', 'github-theme-updater' ); ?></span>
-							<span><?php esc_html_e( 'Last activity', 'github-theme-updater' ); ?></span>
 							<span><?php esc_html_e( 'Actions', 'github-theme-updater' ); ?></span>
 						</div>
 
@@ -194,7 +193,7 @@ class Admin_Page {
 			.github-theme-updater-list-head,
 			.github-theme-updater-list-row {
 				display: grid;
-				grid-template-columns: minmax(260px, 1.8fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(180px, 1fr) minmax(240px, 1.3fr);
+				grid-template-columns: minmax(260px, 1.8fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(240px, 1.3fr);
 				gap: 16px;
 				align-items: start;
 			}
@@ -254,13 +253,11 @@ class Admin_Page {
 				color: #8a6700;
 			}
 
-			.github-theme-updater-version-line,
-			.github-theme-updater-activity-line {
+			.github-theme-updater-version-line {
 				margin: 0 0 6px;
 			}
 
-			.github-theme-updater-version-line strong,
-			.github-theme-updater-activity-line strong {
+			.github-theme-updater-version-line strong {
 				display: block;
 				font-size: 12px;
 				color: #50575e;
@@ -658,7 +655,7 @@ class Admin_Page {
 	 * @return string
 	 */
 	protected function get_settings_page_url() {
-		return admin_url( 'options-general.php?page=' . self::PAGE_SLUG );
+		return admin_url( 'themes.php?page=' . self::PAGE_SLUG );
 	}
 
 	/**
@@ -773,17 +770,6 @@ class Admin_Page {
 				<p class="github-theme-updater-version-line">
 					<strong><?php esc_html_e( 'GitHub', 'github-theme-updater' ); ?></strong>
 					<span><?php echo esc_html( $summary['remote_version'] ); ?></span>
-				</p>
-			</div>
-
-			<div>
-				<p class="github-theme-updater-activity-line">
-					<strong><?php esc_html_e( 'Last action', 'github-theme-updater' ); ?></strong>
-					<span><?php echo esc_html( $summary['last_action'] ); ?></span>
-				</p>
-				<p class="github-theme-updater-activity-line">
-					<strong><?php esc_html_e( 'Last check', 'github-theme-updater' ); ?></strong>
-					<span><?php echo esc_html( $summary['last_checked_at'] ); ?></span>
 				</p>
 			</div>
 
@@ -930,14 +916,8 @@ class Admin_Page {
 			'ref'               => '' !== $theme['repository_ref'] ? $theme['repository_ref'] : 'main',
 			'status_badge'      => $is_installed ? __( 'Installed', 'github-theme-updater' ) : __( 'Not installed', 'github-theme-updater' ),
 			'status_detail'     => $status_detail,
-			'installed_version' => $is_installed
-				? (string) $local_theme->get( 'Version' )
-				: ( ! empty( $theme['last_installed_version'] ) ? $theme['last_installed_version'] : __( '—', 'github-theme-updater' ) ),
-			'remote_version'    => '' !== $remote_version
-				? $remote_version
-				: ( ! empty( $theme['last_remote_version'] ) ? $theme['last_remote_version'] : __( 'Unknown', 'github-theme-updater' ) ),
-			'last_action'       => $this->get_last_action_label( $theme ),
-			'last_checked_at'   => $this->format_last_checked( $theme ),
+			'installed_version' => $is_installed ? (string) $local_theme->get( 'Version' ) : __( '—', 'github-theme-updater' ),
+			'remote_version'    => '' !== $remote_version ? $remote_version : __( 'Unknown', 'github-theme-updater' ),
 			'is_installed'      => $is_installed,
 		);
 	}
@@ -1046,46 +1026,4 @@ class Admin_Page {
 		return $parsed['owner'] . '/' . $parsed['repo'];
 	}
 
-	/**
-	 * Format the last action label.
-	 *
-	 * @param array<string, string> $theme Theme config.
-	 * @return string
-	 */
-	protected function get_last_action_label( array $theme ) {
-		switch ( $theme['last_action'] ) {
-			case 'installed':
-				return __( 'Installed from GitHub', 'github-theme-updater' );
-			case 'updated':
-				return __( 'Force updated', 'github-theme-updater' );
-			case 'checked':
-				return __( 'Checked for updates', 'github-theme-updater' );
-			default:
-				return __( 'No action yet', 'github-theme-updater' );
-		}
-	}
-
-	/**
-	 * Format the last checked timestamp.
-	 *
-	 * @param array<string, string> $theme Theme config.
-	 * @return string
-	 */
-	protected function format_last_checked( array $theme ) {
-		if ( empty( $theme['last_checked_at'] ) ) {
-			return __( 'Never', 'github-theme-updater' );
-		}
-
-		$date = \DateTimeImmutable::createFromFormat(
-			'Y-m-d H:i:s',
-			$theme['last_checked_at'],
-			wp_timezone()
-		);
-
-		if ( false === $date ) {
-			return $theme['last_checked_at'];
-		}
-
-		return wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $date->getTimestamp() );
-	}
 }

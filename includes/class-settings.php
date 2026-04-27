@@ -36,10 +36,6 @@ class Settings {
 			'theme_stylesheet_custom'=> '',
 			'github_login'           => '',
 			'access_token'           => '',
-			'last_action'            => '',
-			'last_checked_at'        => '',
-			'last_installed_version' => '',
-			'last_remote_version'    => '',
 		);
 	}
 
@@ -149,46 +145,6 @@ class Settings {
 			}
 
 			$theme['theme_stylesheet'] = $stylesheet;
-			break;
-		}
-		unset( $theme );
-
-		update_option( self::OPTION_NAME, $settings, false );
-	}
-
-	/**
-	 * Update runtime metadata for one configured theme.
-	 *
-	 * @param string               $theme_id Theme config ID.
-	 * @param array<string,string> $data     Metadata values.
-	 * @return void
-	 */
-	public function update_theme_runtime_state( $theme_id, array $data ) {
-		$theme_id = sanitize_key( $theme_id );
-
-		if ( '' === $theme_id || empty( $data ) ) {
-			return;
-		}
-
-		$settings = $this->get_all();
-
-		if ( empty( $settings['themes'] ) || ! is_array( $settings['themes'] ) ) {
-			return;
-		}
-
-		foreach ( $settings['themes'] as &$theme ) {
-			if ( ! is_array( $theme ) || empty( $theme['id'] ) || $theme_id !== $theme['id'] ) {
-				continue;
-			}
-
-			foreach ( $data as $key => $value ) {
-				if ( ! array_key_exists( $key, $this->get_theme_defaults() ) ) {
-					continue;
-				}
-
-				$theme[ $key ] = sanitize_text_field( (string) $value );
-			}
-
 			break;
 		}
 		unset( $theme );
