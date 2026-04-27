@@ -41,7 +41,7 @@ class Plugin {
 		$this->settings   = new Settings();
 		$this->client     = new GitHub_Client( $this->settings );
 		$this->updater    = new Theme_Updater( $this->settings, $this->client );
-		$this->admin_page = new Admin_Page( $this->settings, $this->updater );
+		$this->admin_page = new Admin_Page( $this->settings, $this->updater, $this->client );
 	}
 
 	/**
