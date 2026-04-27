@@ -52,9 +52,30 @@ class Plugin {
 	public function register() {
 		$this->updater->register_hooks();
 
+		add_filter( 'plugin_action_links_' . plugin_basename( GITHUB_THEME_UPDATER_FILE ), array( $this, 'add_plugin_action_links' ) );
+
 		if ( is_admin() ) {
 			$this->admin_page->register_hooks();
 		}
+	}
+
+	/**
+	 * Add a Settings link to the plugin row on the Plugins screen.
+	 *
+	 * @param array<int, string> $links Existing action links.
+	 * @return array<int, string>
+	 */
+	public function add_plugin_action_links( array $links ) {
+		array_unshift(
+			$links,
+			sprintf(
+				'<a href="%s">%s</a>',
+				esc_url( admin_url( 'themes.php?page=' . Admin_Page::PAGE_SLUG ) ),
+				esc_html__( 'Settings', 'github-theme-updater' )
+			)
+		);
+
+		return $links;
 	}
 
 	/**
