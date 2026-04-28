@@ -30,11 +30,11 @@ class Theme_Updater {
 	protected $manual_upgrade_theme_id = '';
 
 	/**
-	 * Temporary .git backups keyed by theme stylesheet.
+	 * Prepared backup directories keyed by theme stylesheet.
 	 *
 	 * @var array<string, string>
 	 */
-	protected $preserved_git_directories = array();
+	protected $prepared_backup_directories = array();
 
 	/**
 	 * Constructor.
@@ -56,7 +56,7 @@ class Theme_Updater {
 		add_filter( 'pre_set_site_transient_update_themes', array( $this, 'inject_update' ) );
 		add_filter( 'themes_api', array( $this, 'filter_themes_api' ), 10, 3 );
 		add_filter( 'upgrader_pre_download', array( $this, 'filter_pre_download' ), 10, 4 );
-		add_filter( 'upgrader_pre_install', array( $this, 'preserve_git_directory_before_install' ), 5, 2 );
+		add_filter( 'upgrader_pre_install', array( $this, 'prepare_theme_backup_before_install' ), 5, 2 );
 		add_filter( 'upgrader_post_install', array( $this, 'restore_git_directory_after_install' ), 5, 3 );
 		add_filter( 'upgrader_source_selection', array( $this, 'normalize_package_source' ), 5, 4 );
 	}
@@ -309,16 +309,26 @@ class Theme_Updater {
 		$this->manual_upgrade_theme_id = '';
 
 		if ( is_wp_error( $result ) ) {
-			$this->restore_preserved_git_directory( $stylesheet );
+			$restore_result = $this->restore_prepared_theme_from_backup( $stylesheet );
+			if ( is_wp_error( $restore_result ) ) {
+				return $this->append_restore_error( $result, $restore_result );
+			}
+
 			return $result;
 		}
 
 		if ( false === $result ) {
-			$this->restore_preserved_git_directory( $stylesheet );
-			return new WP_Error(
+			$restore_result = $this->restore_prepared_theme_from_backup( $stylesheet );
+			$error          = new WP_Error(
 				'github_theme_updater_upgrade_failed',
 				__( 'The theme upgrade could not be completed from GitHub.', 'github-theme-updater' )
 			);
+
+			if ( is_wp_error( $restore_result ) ) {
+				return $this->append_restore_error( $error, $restore_result );
+			}
+
+			return $error;
 		}
 
 		$this->settings->clear_cache( array( $theme_id ) );
@@ -412,16 +422,26 @@ class Theme_Updater {
 		$this->manual_upgrade_theme_id = '';
 
 		if ( is_wp_error( $result ) ) {
-			$this->restore_preserved_git_directory( $remote['stylesheet'] );
+			$restore_result = $this->restore_prepared_theme_from_backup( $remote['stylesheet'] );
+			if ( is_wp_error( $restore_result ) ) {
+				return $this->append_restore_error( $result, $restore_result );
+			}
+
 			return $result;
 		}
 
 		if ( false === $result ) {
-			$this->restore_preserved_git_directory( $remote['stylesheet'] );
-			return new WP_Error(
+			$restore_result = $this->restore_prepared_theme_from_backup( $remote['stylesheet'] );
+			$error          = new WP_Error(
 				'github_theme_updater_install_failed',
 				__( 'The theme could not be installed from GitHub.', 'github-theme-updater' )
 			);
+
+			if ( is_wp_error( $restore_result ) ) {
+				return $this->append_restore_error( $error, $restore_result );
+			}
+
+			return $error;
 		}
 
 		$this->settings->set_theme_stylesheet( $theme_id, $remote['stylesheet'] );
@@ -504,15 +524,13 @@ class Theme_Updater {
 	}
 
 	/**
-	 * Preserve the existing .git directory before WordPress clears the theme directory.
+	 * Create a persistent backup of the existing theme before WordPress clears it.
 	 *
 	 * @param bool|WP_Error        $response   Installation response.
 	 * @param array<string, mixed> $hook_extra Hook metadata.
 	 * @return bool|WP_Error
 	 */
-	public function preserve_git_directory_before_install( $response, array $hook_extra ) {
-		global $wp_filesystem;
-
+	public function prepare_theme_backup_before_install( $response, array $hook_extra ) {
 		if ( is_wp_error( $response ) ) {
 			return $response;
 		}
@@ -522,51 +540,54 @@ class Theme_Updater {
 		}
 
 		$stylesheet = $this->resolve_hook_theme_stylesheet( $hook_extra );
-		if ( '' === $stylesheet || isset( $this->preserved_git_directories[ $stylesheet ] ) ) {
+		if ( '' === $stylesheet || isset( $this->prepared_backup_directories[ $stylesheet ] ) || ! $this->settings->are_backups_enabled() ) {
 			return $response;
 		}
 
-		if ( ! $wp_filesystem ) {
+		$theme_directory = $this->get_theme_directory_path( $stylesheet );
+		if ( '' === $theme_directory || ! is_dir( $theme_directory ) ) {
 			return $response;
 		}
 
-		$theme_root = $wp_filesystem->find_folder( get_theme_root( $stylesheet ) );
-		if ( ! $theme_root ) {
-			return $response;
+		$backup_root = $this->settings->ensure_backup_root_exists();
+		if ( is_wp_error( $backup_root ) ) {
+			return $backup_root;
 		}
 
-		$git_directory = trailingslashit( $theme_root ) . $stylesheet . '/.git';
-		if ( ! $wp_filesystem->exists( $git_directory ) || ! $wp_filesystem->is_dir( $git_directory ) ) {
-			return $response;
+		$backup_directory = $this->settings->get_theme_backup_path( $stylesheet );
+		if ( is_wp_error( $backup_directory ) ) {
+			return $backup_directory;
 		}
 
-		$backup_root = trailingslashit( $wp_filesystem->wp_content_dir() ) . 'upgrade-temp-backup/github-theme-updater/';
-		if ( ! $wp_filesystem->is_dir( $backup_root ) && ! $wp_filesystem->mkdir( $backup_root, FS_CHMOD_DIR ) ) {
+		$backup_parent = dirname( $backup_directory );
+
+		if ( ! is_dir( $backup_parent ) && ! wp_mkdir_p( $backup_parent ) ) {
 			return new WP_Error(
-				'github_theme_updater_git_backup_dir_failed',
-				__( 'Could not create a temporary backup directory for the theme Git repository.', 'github-theme-updater' )
+				'github_theme_updater_backup_parent_failed',
+				__( 'Could not prepare the backup location for the theme update.', 'github-theme-updater' )
 			);
 		}
 
-		$backup_directory = trailingslashit( $backup_root ) . $stylesheet . '-' . wp_generate_password( 8, false, false ) . '/.git';
-		$backup_parent    = dirname( $backup_directory );
-
-		if ( ! $wp_filesystem->is_dir( $backup_parent ) && ! $wp_filesystem->mkdir( $backup_parent, FS_CHMOD_DIR ) ) {
+		if ( file_exists( $backup_directory ) && ! $this->delete_local_directory( $backup_directory ) ) {
 			return new WP_Error(
-				'github_theme_updater_git_backup_parent_failed',
-				__( 'Could not prepare a temporary backup location for the theme Git repository.', 'github-theme-updater' )
+				'github_theme_updater_backup_cleanup_failed',
+				__( 'Could not clear the previous saved backup before creating a new one.', 'github-theme-updater' )
 			);
 		}
 
-		$copy_result = copy_dir( $git_directory, $backup_directory );
+		$copy_result = $this->copy_local_directory( $theme_directory, $backup_directory );
 		if ( is_wp_error( $copy_result ) ) {
 			return new WP_Error(
-				'github_theme_updater_git_backup_failed',
-				__( 'Could not back up the theme Git repository before the update started.', 'github-theme-updater' )
+				'github_theme_updater_theme_backup_failed',
+				sprintf(
+					/* translators: %s: Detailed backup error message. */
+					__( 'Could not create a backup of the installed theme before the update started. %s', 'github-theme-updater' ),
+					$copy_result->get_error_message()
+				)
 			);
 		}
 
-		$this->preserved_git_directories[ $stylesheet ] = $backup_directory;
+		$this->prepared_backup_directories[ $stylesheet ] = $backup_directory;
 
 		return $response;
 	}
@@ -599,48 +620,335 @@ class Theme_Updater {
 		}
 
 		if ( '' !== $stylesheet ) {
-			$this->restore_preserved_git_directory( $stylesheet, isset( $result['destination'] ) ? (string) $result['destination'] : '' );
+			$this->restore_git_directory_from_prepared_backup( $stylesheet, isset( $result['destination'] ) ? (string) $result['destination'] : '' );
+			$this->clear_prepared_backup( $stylesheet );
 		}
 
 		return $response;
 	}
 
 	/**
-	 * Restore a preserved .git directory for one stylesheet.
+	 * Restore a saved backup for one theme configuration.
+	 *
+	 * @param string $theme_id Theme config ID.
+	 * @return array<string, string>|WP_Error
+	 */
+	public function restore_backup( $theme_id ) {
+		$theme_config = $this->settings->get_theme( $theme_id );
+		if ( ! is_array( $theme_config ) ) {
+			return new WP_Error(
+				'github_theme_updater_missing_theme_config',
+				__( 'The selected theme configuration could not be found.', 'github-theme-updater' )
+			);
+		}
+
+		$stylesheet = ! empty( $theme_config['theme_stylesheet'] ) ? sanitize_key( $theme_config['theme_stylesheet'] ) : '';
+		if ( '' === $stylesheet ) {
+			$remote = $this->client->get_remote_theme_data( $theme_id );
+			if ( is_wp_error( $remote ) ) {
+				return $remote;
+			}
+
+			$stylesheet = sanitize_key( $this->client->resolve_target_stylesheet( $theme_config, $remote ) );
+		}
+
+		if ( '' === $stylesheet ) {
+			return new WP_Error(
+				'github_theme_updater_missing_stylesheet',
+				__( 'The selected theme could not be mapped to a WordPress theme directory.', 'github-theme-updater' )
+			);
+		}
+
+		$backup_directory = $this->settings->get_theme_backup_path( $stylesheet );
+		if ( is_wp_error( $backup_directory ) ) {
+			return $backup_directory;
+		}
+
+		if ( ! is_dir( $backup_directory ) ) {
+			return new WP_Error(
+				'github_theme_updater_backup_missing',
+				__( 'No saved backup is available for the selected theme yet.', 'github-theme-updater' )
+			);
+		}
+
+		$theme_directory = $this->get_theme_directory_path( $stylesheet );
+		if ( '' === $theme_directory ) {
+			return new WP_Error(
+				'github_theme_updater_theme_directory_missing',
+				__( 'The WordPress theme directory could not be resolved for this backup restore.', 'github-theme-updater' )
+			);
+		}
+
+		if ( file_exists( $theme_directory ) && ! $this->delete_local_directory( $theme_directory ) ) {
+			return new WP_Error(
+				'github_theme_updater_restore_cleanup_failed',
+				__( 'Could not remove the current theme files before restoring the backup.', 'github-theme-updater' )
+			);
+		}
+
+		$restore_result = $this->copy_local_directory( $backup_directory, $theme_directory );
+		if ( is_wp_error( $restore_result ) ) {
+			return new WP_Error(
+				'github_theme_updater_restore_failed',
+				sprintf(
+					/* translators: %s: Detailed restore error message. */
+					__( 'Could not restore the saved theme backup. %s', 'github-theme-updater' ),
+					$restore_result->get_error_message()
+				)
+			);
+		}
+
+		$this->settings->set_theme_stylesheet( $theme_id, $stylesheet );
+		$this->settings->clear_cache( array( $theme_id ) );
+
+		$restored_theme = wp_get_theme( $stylesheet );
+
+		return array(
+			'theme_name'        => $restored_theme->get( 'Name' ) ? $restored_theme->get( 'Name' ) : $stylesheet,
+			'installed_version' => (string) $restored_theme->get( 'Version' ),
+		);
+	}
+
+	/**
+	 * Restore the preserved .git directory for one stylesheet.
 	 *
 	 * @param string $stylesheet       Theme stylesheet.
 	 * @param string $destination_path Installed theme destination.
 	 * @return void
 	 */
-	protected function restore_preserved_git_directory( $stylesheet, $destination_path = '' ) {
-		global $wp_filesystem;
-
+	protected function restore_git_directory_from_prepared_backup( $stylesheet, $destination_path = '' ) {
 		$stylesheet = sanitize_key( $stylesheet );
 
-		if ( '' === $stylesheet || empty( $this->preserved_git_directories[ $stylesheet ] ) || ! $wp_filesystem ) {
+		if ( '' === $stylesheet || empty( $this->prepared_backup_directories[ $stylesheet ] ) ) {
 			return;
 		}
 
-		$backup_directory = $this->preserved_git_directories[ $stylesheet ];
+		$backup_directory = trailingslashit( $this->prepared_backup_directories[ $stylesheet ] ) . '.git';
 		$theme_directory  = '' !== $destination_path
 			? untrailingslashit( $destination_path )
-			: trailingslashit( $wp_filesystem->find_folder( get_theme_root( $stylesheet ) ) ) . $stylesheet;
+			: $this->get_theme_directory_path( $stylesheet );
 
 		$git_directory = trailingslashit( $theme_directory ) . '.git';
 
-		if ( ! $wp_filesystem->is_dir( $theme_directory ) ) {
+		if ( '' === $theme_directory || ! is_dir( $theme_directory ) || ! is_dir( $backup_directory ) ) {
 			return;
 		}
 
-		if ( ! $wp_filesystem->exists( $git_directory ) ) {
-			$restore_result = copy_dir( $backup_directory, $git_directory );
+		if ( ! file_exists( $git_directory ) ) {
+			$restore_result = $this->copy_local_directory( $backup_directory, $git_directory );
 			if ( is_wp_error( $restore_result ) ) {
 				return;
 			}
 		}
+	}
 
-		$wp_filesystem->delete( dirname( $backup_directory ), true );
-		unset( $this->preserved_git_directories[ $stylesheet ] );
+	/**
+	 * Restore the full theme from the prepared backup after a failed update.
+	 *
+	 * @param string $stylesheet Theme stylesheet.
+	 * @return void
+	 */
+	protected function restore_prepared_theme_from_backup( $stylesheet ) {
+		$stylesheet = sanitize_key( $stylesheet );
+
+		if ( '' === $stylesheet || empty( $this->prepared_backup_directories[ $stylesheet ] ) ) {
+			return true;
+		}
+
+		$backup_directory = $this->prepared_backup_directories[ $stylesheet ];
+		$theme_directory  = $this->get_theme_directory_path( $stylesheet );
+
+		if ( '' === $theme_directory || ! is_dir( $backup_directory ) ) {
+			$this->clear_prepared_backup( $stylesheet );
+			return new WP_Error(
+				'github_theme_updater_restore_backup_missing',
+				__( 'The saved backup could not be found after the theme update failed.', 'github-theme-updater' )
+			);
+		}
+
+		if ( file_exists( $theme_directory ) && ! $this->delete_local_directory( $theme_directory ) ) {
+			$this->clear_prepared_backup( $stylesheet );
+			return new WP_Error(
+				'github_theme_updater_restore_cleanup_failed',
+				__( 'Could not clear the broken theme directory before restoring the saved backup.', 'github-theme-updater' )
+			);
+		}
+
+		$restore_result = $this->copy_local_directory( $backup_directory, $theme_directory );
+		$this->clear_prepared_backup( $stylesheet );
+
+		if ( is_wp_error( $restore_result ) ) {
+			return new WP_Error(
+				'github_theme_updater_restore_failed',
+				sprintf(
+					/* translators: %s: Detailed restore error message. */
+					__( 'The theme update failed and the saved backup could not be restored. %s', 'github-theme-updater' ),
+					$restore_result->get_error_message()
+				)
+			);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Clear one prepared backup marker for the current request.
+	 *
+	 * @param string $stylesheet Theme stylesheet.
+	 * @return void
+	 */
+	protected function clear_prepared_backup( $stylesheet ) {
+		$stylesheet = sanitize_key( $stylesheet );
+
+		if ( '' === $stylesheet ) {
+			return;
+		}
+
+		unset( $this->prepared_backup_directories[ $stylesheet ] );
+	}
+
+	/**
+	 * Resolve the full path to one installed theme directory.
+	 *
+	 * @param string $stylesheet Theme stylesheet.
+	 * @return string
+	 */
+	protected function get_theme_directory_path( $stylesheet ) {
+		$stylesheet = sanitize_key( $stylesheet );
+
+		if ( '' === $stylesheet ) {
+			return '';
+		}
+
+		$theme_root = get_theme_root( $stylesheet );
+
+		if ( ! is_string( $theme_root ) || '' === $theme_root ) {
+			return '';
+		}
+
+		return untrailingslashit( trailingslashit( $theme_root ) . $stylesheet );
+	}
+
+	/**
+	 * Copy a local directory recursively, including hidden files.
+	 *
+	 * @param string $source      Source directory.
+	 * @param string $destination Destination directory.
+	 * @return true|WP_Error
+	 */
+	protected function copy_local_directory( $source, $destination ) {
+		$source      = untrailingslashit( $source );
+		$destination = untrailingslashit( $destination );
+
+		if ( '' === $source || ! is_dir( $source ) ) {
+			return new WP_Error(
+				'github_theme_updater_copy_source_missing',
+				__( 'The source directory for the backup copy is missing.', 'github-theme-updater' )
+			);
+		}
+
+		if ( ! file_exists( $destination ) && ! wp_mkdir_p( $destination ) ) {
+			return new WP_Error(
+				'github_theme_updater_copy_destination_failed',
+				__( 'The destination directory for the backup copy could not be created.', 'github-theme-updater' )
+			);
+		}
+
+		$items = scandir( $source );
+		if ( false === $items ) {
+			return new WP_Error(
+				'github_theme_updater_copy_dirlist_failed',
+				__( 'The source directory could not be listed for the backup copy.', 'github-theme-updater' )
+			);
+		}
+
+		foreach ( $items as $item ) {
+			if ( '.' === $item || '..' === $item ) {
+				continue;
+			}
+
+			$source_path      = $source . '/' . $item;
+			$destination_path = $destination . '/' . $item;
+
+			if ( is_dir( $source_path ) ) {
+				$result = $this->copy_local_directory( $source_path, $destination_path );
+
+				if ( is_wp_error( $result ) ) {
+					return $result;
+				}
+
+				continue;
+			}
+
+			if ( ! copy( $source_path, $destination_path ) ) {
+				return new WP_Error(
+					'github_theme_updater_copy_file_failed',
+					sprintf(
+						/* translators: %s: File path. */
+						__( 'Could not copy the file %s.', 'github-theme-updater' ),
+						$source_path
+					)
+				);
+			}
+
+			wp_opcache_invalidate( $destination_path );
+		}
+
+		return true;
+	}
+
+	/**
+	 * Delete a local file or directory recursively.
+	 *
+	 * @param string $path File or directory path.
+	 * @return bool
+	 */
+	protected function delete_local_directory( $path ) {
+		$path = untrailingslashit( $path );
+
+		if ( '' === $path || ! file_exists( $path ) ) {
+			return true;
+		}
+
+		if ( is_file( $path ) || is_link( $path ) ) {
+			return unlink( $path );
+		}
+
+		$items = scandir( $path );
+		if ( false === $items ) {
+			return false;
+		}
+
+		foreach ( $items as $item ) {
+			if ( '.' === $item || '..' === $item ) {
+				continue;
+			}
+
+			if ( ! $this->delete_local_directory( $path . '/' . $item ) ) {
+				return false;
+			}
+		}
+
+		return rmdir( $path );
+	}
+
+	/**
+	 * Append backup restore details to an existing error.
+	 *
+	 * @param WP_Error $error         Original error.
+	 * @param WP_Error $restore_error Backup restore error.
+	 * @return WP_Error
+	 */
+	protected function append_restore_error( WP_Error $error, WP_Error $restore_error ) {
+		return new WP_Error(
+			$error->get_error_code(),
+			sprintf(
+				/* translators: 1: Original error, 2: Restore error. */
+				__( '%1$s Backup restore also failed: %2$s', 'github-theme-updater' ),
+				$error->get_error_message(),
+				$restore_error->get_error_message()
+			)
+		);
 	}
 
 	/**

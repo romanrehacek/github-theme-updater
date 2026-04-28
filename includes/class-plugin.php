@@ -90,6 +90,13 @@ class Plugin {
 			add_option( Settings::OPTION_NAME, $settings->get_defaults() );
 		}
 
+		$backup_result = $settings->ensure_backup_root_exists();
+		if ( is_wp_error( $backup_result ) ) {
+			update_option( Settings::ACTIVATION_NOTICE_OPTION, $backup_result->get_error_message(), false );
+		} else {
+			delete_option( Settings::ACTIVATION_NOTICE_OPTION );
+		}
+
 		$settings->clear_cache();
 	}
 

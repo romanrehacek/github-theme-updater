@@ -62,6 +62,7 @@ class Admin_Page {
 		add_action( 'admin_post_github_theme_updater_install_theme', array( $this, 'handle_install_theme' ) );
 		add_action( 'admin_post_github_theme_updater_check_now', array( $this, 'handle_check_now' ) );
 		add_action( 'admin_post_github_theme_updater_force_update', array( $this, 'handle_force_update' ) );
+		add_action( 'admin_post_github_theme_updater_restore_backup', array( $this, 'handle_restore_backup' ) );
 		add_action( 'admin_post_github_theme_updater_delete_theme', array( $this, 'handle_delete_theme' ) );
 		add_action( 'admin_notices', array( $this, 'render_notices' ) );
 	}
@@ -107,8 +108,10 @@ class Admin_Page {
 			return;
 		}
 
+		$all_settings  = $this->settings->get_all();
 		$themes        = $this->settings->get_themes();
 		$theme_choices = $this->get_installed_theme_choices();
+		$backup_status = $this->settings->get_backup_root_status();
 
 		?>
 		<div class="wrap github-theme-updater-admin">
@@ -120,8 +123,13 @@ class Admin_Page {
 			<form id="github-theme-updater-form" action="options.php" method="post">
 				<?php settings_fields( 'github_theme_updater' ); ?>
 
+				<?php echo $this->get_backup_panel_markup( $all_settings, $backup_status ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+
 				<div class="github-theme-updater-toolbar">
-					<button type="button" class="button button-primary" id="github-theme-updater-add-theme"><?php esc_html_e( 'Add new theme', 'github-theme-updater' ); ?></button>
+					<div class="github-theme-updater-toolbar-actions">
+						<button type="button" class="button button-primary" id="github-theme-updater-add-theme"><?php esc_html_e( 'Add new theme', 'github-theme-updater' ); ?></button>
+						<button type="submit" class="button"><?php esc_html_e( 'Save settings', 'github-theme-updater' ); ?></button>
+					</div>
 				</div>
 
 				<?php if ( empty( $themes ) ) : ?>
@@ -169,6 +177,12 @@ class Admin_Page {
 				margin: 20px 0 16px;
 			}
 
+			.github-theme-updater-toolbar-actions {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+			}
+
 			.github-theme-updater-toolbar h2 {
 				margin: 0 0 4px;
 			}
@@ -179,10 +193,68 @@ class Admin_Page {
 			}
 
 			.github-theme-updater-empty-state,
-			.github-theme-updater-list-row {
+			.github-theme-updater-list-row,
+			.github-theme-updater-backup-panel {
 				background: #fff;
 				border: 1px solid #dcdcde;
 				border-radius: 8px;
+			}
+
+			.github-theme-updater-backup-panel {
+				padding: 20px;
+				margin-top: 20px;
+			}
+
+			.github-theme-updater-backup-panel-header {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 16px;
+				margin-bottom: 16px;
+			}
+
+			.github-theme-updater-backup-panel-header h2 {
+				margin: 0 0 6px;
+			}
+
+			.github-theme-updater-backup-panel-header p {
+				margin: 0;
+				color: #50575e;
+				max-width: 760px;
+			}
+
+			.github-theme-updater-backup-toggle {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+				font-weight: 600;
+			}
+
+			.github-theme-updater-backup-meta {
+				display: grid;
+				gap: 12px;
+			}
+
+			.github-theme-updater-backup-meta p {
+				margin: 0;
+			}
+
+			.github-theme-updater-backup-path code {
+				display: inline-block;
+				margin-top: 4px;
+				word-break: break-all;
+			}
+
+			.github-theme-updater-backup-status {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+				flex-wrap: wrap;
+			}
+
+			.github-theme-updater-backup-note {
+				color: #50575e;
 			}
 
 			.github-theme-updater-empty-state {
@@ -364,6 +436,10 @@ class Admin_Page {
 
 			@media (max-width: 782px) {
 				.github-theme-updater-toolbar {
+					flex-direction: column;
+				}
+
+				.github-theme-updater-backup-panel-header {
 					flex-direction: column;
 				}
 
@@ -552,6 +628,33 @@ class Admin_Page {
 	}
 
 	/**
+	 * Handle restoring one saved backup.
+	 *
+	 * @return void
+	 */
+	public function handle_restore_backup() {
+		$this->authorize_action( 'github_theme_updater_restore_backup' );
+
+		$result = $this->updater->restore_backup( $this->get_requested_theme_id() );
+		if ( is_wp_error( $result ) ) {
+			$this->queue_notice_from_error( $result );
+		} else {
+			$this->queue_notice(
+				sprintf(
+					/* translators: 1: Theme name, 2: Installed version. */
+					__( '%1$s was restored from the saved backup. Current installed version: %2$s.', 'github-theme-updater' ),
+					$result['theme_name'],
+					$result['installed_version']
+				),
+				'success'
+			);
+		}
+
+		wp_safe_redirect( $this->get_settings_page_url() );
+		exit;
+	}
+
+	/**
 	 * Handle deleting one theme configuration.
 	 *
 	 * @return void
@@ -583,8 +686,22 @@ class Admin_Page {
 			return;
 		}
 
-		$notices = get_transient( $this->settings->get_notice_key() );
-		if ( ! is_array( $notices ) || empty( $notices ) ) {
+		$notices           = get_transient( $this->settings->get_notice_key() );
+		$activation_notice = get_option( Settings::ACTIVATION_NOTICE_OPTION, '' );
+
+		if ( ! is_array( $notices ) ) {
+			$notices = array();
+		}
+
+		if ( '' !== $activation_notice ) {
+			$notices[] = array(
+				'message' => $activation_notice,
+				'type'    => 'warning',
+			);
+			delete_option( Settings::ACTIVATION_NOTICE_OPTION );
+		}
+
+		if ( empty( $notices ) ) {
 			return;
 		}
 
@@ -734,10 +851,11 @@ class Admin_Page {
 	 * @return string
 	 */
 	protected function get_theme_row_markup( $index, array $theme, array $theme_choices ) {
-		$summary     = $this->get_theme_summary( $theme );
-		$editor_id   = 'github-theme-updater-editor-' . $index;
-		$status_css  = $summary['is_installed'] ? 'is-installed' : 'is-missing';
-		$delete_url  = ! empty( $theme['id'] ) ? $this->get_action_url( 'github_theme_updater_delete_theme', 'github_theme_updater_delete_theme', $theme['id'] ) : '';
+		$summary            = $this->get_theme_summary( $theme );
+		$editor_id          = 'github-theme-updater-editor-' . $index;
+		$status_css         = $summary['is_installed'] ? 'is-installed' : 'is-missing';
+		$delete_url         = ! empty( $theme['id'] ) ? $this->get_action_url( 'github_theme_updater_delete_theme', 'github_theme_updater_delete_theme', $theme['id'] ) : '';
+		$restore_backup_url = ! empty( $theme['id'] ) ? $this->get_action_url( 'github_theme_updater_restore_backup', 'github_theme_updater_restore_backup', $theme['id'] ) : '';
 
 		ob_start();
 		?>
@@ -760,6 +878,9 @@ class Admin_Page {
 			<div>
 				<span class="github-theme-updater-status-badge <?php echo esc_attr( $status_css ); ?>"><?php echo esc_html( $summary['status_badge'] ); ?></span>
 				<p class="github-theme-updater-theme-meta"><?php echo esc_html( $summary['status_detail'] ); ?></p>
+				<?php if ( ! empty( $summary['backup_detail'] ) ) : ?>
+					<p class="github-theme-updater-theme-meta"><?php echo esc_html( $summary['backup_detail'] ); ?></p>
+				<?php endif; ?>
 			</div>
 
 			<div>
@@ -780,6 +901,9 @@ class Admin_Page {
 						<a class="button button-primary" href="<?php echo esc_url( $this->get_action_url( 'github_theme_updater_force_update', 'github_theme_updater_force_update', $theme['id'] ) ); ?>" onclick="return confirm('<?php echo esc_js( __( 'This will overwrite the selected theme with the package from GitHub. Continue?', 'github-theme-updater' ) ); ?>');"><?php esc_html_e( 'Force update', 'github-theme-updater' ); ?></a>
 					<?php else : ?>
 						<a class="button button-primary" href="<?php echo esc_url( $this->get_action_url( 'github_theme_updater_install_theme', 'github_theme_updater_install_theme', $theme['id'] ) ); ?>" onclick="return confirm('<?php echo esc_js( __( 'This will download and install the configured theme from GitHub. Continue?', 'github-theme-updater' ) ); ?>');"><?php esc_html_e( 'Install from GitHub', 'github-theme-updater' ); ?></a>
+					<?php endif; ?>
+					<?php if ( ! empty( $summary['has_backup'] ) ) : ?>
+						<a class="button" href="<?php echo esc_url( $restore_backup_url ); ?>" onclick="return confirm('<?php echo esc_js( __( 'This will replace the current theme files with the saved backup. Continue?', 'github-theme-updater' ) ); ?>');"><?php esc_html_e( 'Restore backup', 'github-theme-updater' ); ?></a>
 					<?php endif; ?>
 				<?php endif; ?>
 				<button type="button" class="button" data-open-editor="<?php echo esc_attr( $editor_id ); ?>"><?php esc_html_e( 'Edit', 'github-theme-updater' ); ?></button>
@@ -897,6 +1021,10 @@ class Admin_Page {
 	protected function get_theme_summary( array $theme ) {
 		$parent_slugs      = $this->get_parent_theme_map();
 		$stylesheet        = $this->get_effective_stylesheet( $theme );
+		$backup_details    = '' !== $stylesheet ? $this->settings->get_theme_backup_details( $stylesheet ) : array(
+			'exists'   => false,
+			'modified' => 0,
+		);
 		$remote            = $this->get_cached_remote_theme_data( $theme );
 		$local_theme       = '' !== $stylesheet ? wp_get_theme( $stylesheet ) : null;
 		$is_installed      = $local_theme instanceof \WP_Theme && $local_theme->exists();
@@ -908,6 +1036,13 @@ class Admin_Page {
 		$status_detail     = $is_installed
 			? $this->get_theme_status_label( $local_theme, $parent_slugs )
 			: ( '' !== $stylesheet ? __( 'Configuration ready for install or reconnect.', 'github-theme-updater' ) : __( 'Theme will be installed on first action.', 'github-theme-updater' ) );
+		$backup_detail     = ! empty( $backup_details['exists'] )
+			? sprintf(
+				/* translators: %s: Backup modified date. */
+				__( 'Backup available from %s.', 'github-theme-updater' ),
+				! empty( $backup_details['modified'] ) ? wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $backup_details['modified'] ) : __( 'an earlier update', 'github-theme-updater' )
+			)
+			: '';
 
 		return array(
 			'name'              => $theme_name,
@@ -919,6 +1054,8 @@ class Admin_Page {
 			'installed_version' => $is_installed ? (string) $local_theme->get( 'Version' ) : __( '—', 'github-theme-updater' ),
 			'remote_version'    => '' !== $remote_version ? $remote_version : __( 'Unknown', 'github-theme-updater' ),
 			'is_installed'      => $is_installed,
+			'has_backup'        => ! empty( $backup_details['exists'] ),
+			'backup_detail'     => $backup_detail,
 		);
 	}
 
@@ -976,6 +1113,10 @@ class Admin_Page {
 	 * @return string
 	 */
 	protected function get_effective_stylesheet( array $theme ) {
+		if ( ! empty( $theme['theme_stylesheet'] ) ) {
+			return sanitize_key( $theme['theme_stylesheet'] );
+		}
+
 		if ( empty( $theme['id'] ) || empty( $theme['repository_url'] ) ) {
 			return '';
 		}
@@ -1024,6 +1165,64 @@ class Admin_Page {
 		}
 
 		return $parsed['owner'] . '/' . $parsed['repo'];
+	}
+
+	/**
+	 * Build the backup settings panel markup.
+	 *
+	 * @param array<string, mixed> $settings      Plugin settings.
+	 * @param array<string, mixed> $backup_status Backup diagnostics.
+	 * @return string
+	 */
+	protected function get_backup_panel_markup( array $settings, array $backup_status ) {
+		$is_enabled    = ! empty( $settings['backups_enabled'] );
+		$path          = ! empty( $backup_status['path'] ) ? (string) $backup_status['path'] : __( 'Unavailable', 'github-theme-updater' );
+		$is_ready      = ! empty( $backup_status['exists'] ) && ! empty( $backup_status['writable'] );
+		$status_label  = $is_ready ? __( 'Writable', 'github-theme-updater' ) : __( 'Needs attention', 'github-theme-updater' );
+		$status_class  = $is_ready ? 'is-installed' : 'is-missing';
+		$status_detail = '';
+
+		if ( ! empty( $backup_status['error_message'] ) ) {
+			$status_detail = (string) $backup_status['error_message'];
+		} elseif ( empty( $backup_status['exists'] ) ) {
+			$status_detail = __( 'The backup directory is missing and should be recreated before backups can run.', 'github-theme-updater' );
+		} elseif ( empty( $backup_status['writable'] ) ) {
+			$status_detail = __( 'WordPress cannot write to this directory, so pre-update backups will fail while backups are enabled.', 'github-theme-updater' );
+		} else {
+			$status_detail = __( 'This directory is used for one saved backup per theme before install or update, including the theme .git directory.', 'github-theme-updater' );
+		}
+
+		ob_start();
+		?>
+		<div class="github-theme-updater-backup-panel">
+			<div class="github-theme-updater-backup-panel-header">
+				<div>
+					<h2><?php esc_html_e( 'Backups', 'github-theme-updater' ); ?></h2>
+					<p><?php esc_html_e( 'Keep one saved backup per theme before install or update. The same backup is also used to restore the previous theme files later, including the .git directory.', 'github-theme-updater' ); ?></p>
+				</div>
+
+				<label class="github-theme-updater-backup-toggle">
+					<input name="<?php echo esc_attr( Settings::OPTION_NAME ); ?>[backups_enabled]" type="checkbox" value="1" <?php checked( $is_enabled ); ?> />
+					<?php esc_html_e( 'Create backups before install or update', 'github-theme-updater' ); ?>
+				</label>
+			</div>
+
+			<div class="github-theme-updater-backup-meta">
+				<p class="github-theme-updater-backup-path">
+					<strong><?php esc_html_e( 'Backup directory', 'github-theme-updater' ); ?></strong><br />
+					<code><?php echo esc_html( $path ); ?></code>
+				</p>
+
+				<p class="github-theme-updater-backup-status">
+					<strong><?php esc_html_e( 'Status', 'github-theme-updater' ); ?></strong>
+					<span class="github-theme-updater-status-badge <?php echo esc_attr( $status_class ); ?>"><?php echo esc_html( $status_label ); ?></span>
+					<span class="github-theme-updater-backup-note"><?php echo esc_html( $status_detail ); ?></span>
+				</p>
+			</div>
+		</div>
+		<?php
+
+		return (string) ob_get_clean();
 	}
 
 }

@@ -2,22 +2,28 @@
 
 namespace GitHubThemeUpdater;
 
+use WP_Error;
+
 defined( 'ABSPATH' ) || exit;
 
 class Settings {
 
-	const OPTION_NAME                  = 'github_theme_updater_settings';
+	const OPTION_NAME                   = 'github_theme_updater_settings';
 	const REMOTE_CACHE_TRANSIENT_PREFIX = 'github_theme_updater_remote_theme_';
-	const NOTICE_TRANSIENT_KEY         = 'github_theme_updater_notice_';
+	const NOTICE_TRANSIENT_KEY          = 'github_theme_updater_notice_';
+	const ACTIVATION_NOTICE_OPTION      = 'github_theme_updater_activation_notice';
+	const BACKUP_DIRECTORY_NAME         = 'github-theme-updater';
+	const BACKUP_THEME_DIRECTORY        = 'themes';
 
 	/**
 	 * Get default settings.
 	 *
-	 * @return array<string, array<int, array<string, string>>>
+	 * @return array<string, mixed>
 	 */
 	public function get_defaults() {
 		return array(
-			'themes' => array(),
+			'backups_enabled' => '1',
+			'themes'          => array(),
 		);
 	}
 
@@ -28,21 +34,21 @@ class Settings {
 	 */
 	public function get_theme_defaults() {
 		return array(
-			'id'                     => '',
-			'repository_url'         => '',
-			'repository_ref'         => 'main',
-			'theme_stylesheet'       => '',
-			'theme_stylesheet_select'=> '',
-			'theme_stylesheet_custom'=> '',
-			'github_login'           => '',
-			'access_token'           => '',
+			'id'                      => '',
+			'repository_url'          => '',
+			'repository_ref'          => 'main',
+			'theme_stylesheet'        => '',
+			'theme_stylesheet_select' => '',
+			'theme_stylesheet_custom' => '',
+			'github_login'            => '',
+			'access_token'            => '',
 		);
 	}
 
 	/**
 	 * Get all settings merged with defaults.
 	 *
-	 * @return array<string, array<int, array<string, string>>>
+	 * @return array<string, mixed>
 	 */
 	public function get_all() {
 		$settings = get_option( self::OPTION_NAME, array() );
@@ -51,12 +57,24 @@ class Settings {
 			$settings = array();
 		}
 
-		$settings = wp_parse_args( $settings, $this->get_defaults() );
-		$settings['themes'] = isset( $settings['themes'] ) && is_array( $settings['themes'] )
+		$settings                    = wp_parse_args( $settings, $this->get_defaults() );
+		$settings['backups_enabled'] = ! empty( $settings['backups_enabled'] ) ? '1' : '0';
+		$settings['themes']          = isset( $settings['themes'] ) && is_array( $settings['themes'] )
 			? array_values( $settings['themes'] )
 			: array();
 
 		return $settings;
+	}
+
+	/**
+	 * Determine whether automatic backups are enabled.
+	 *
+	 * @return bool
+	 */
+	public function are_backups_enabled() {
+		$settings = $this->get_all();
+
+		return ! empty( $settings['backups_enabled'] );
 	}
 
 	/**
@@ -121,8 +139,8 @@ class Settings {
 	/**
 	 * Persist one resolved stylesheet on a configured theme.
 	 *
-	 * @param string $theme_id    Theme config ID.
-	 * @param string $stylesheet  Theme stylesheet.
+	 * @param string $theme_id   Theme config ID.
+	 * @param string $stylesheet Theme stylesheet.
 	 * @return void
 	 */
 	public function set_theme_stylesheet( $theme_id, $stylesheet ) {
@@ -188,7 +206,7 @@ class Settings {
 	 * Sanitize settings payload.
 	 *
 	 * @param array<string, mixed> $input Raw input.
-	 * @return array<string, array<int, array<string, string>>>
+	 * @return array<string, mixed>
 	 */
 	public function sanitize_options( $input ) {
 		$existing_themes = $this->get_themes();
@@ -196,6 +214,8 @@ class Settings {
 		$sanitized       = $this->get_defaults();
 		$input           = is_array( $input ) ? $input : array();
 		$seen_ids        = array();
+
+		$sanitized['backups_enabled'] = ! empty( $input['backups_enabled'] ) ? '1' : '0';
 
 		foreach ( $existing_themes as $theme ) {
 			if ( ! empty( $theme['id'] ) ) {
@@ -280,6 +300,154 @@ class Settings {
 	}
 
 	/**
+	 * Build the configured backup root path.
+	 *
+	 * @return string|WP_Error
+	 */
+	public function get_backup_root_path() {
+		$uploads = wp_upload_dir();
+
+		if ( ! empty( $uploads['error'] ) ) {
+			return new WP_Error(
+				'github_theme_updater_backup_uploads_unavailable',
+				sprintf(
+					/* translators: %s: WordPress uploads error message. */
+					__( 'The backup directory could not be resolved from WordPress uploads: %s', 'github-theme-updater' ),
+					$uploads['error']
+				)
+			);
+		}
+
+		return trailingslashit( $uploads['basedir'] ) . self::BACKUP_DIRECTORY_NAME;
+	}
+
+	/**
+	 * Get diagnostics for the configured backup root.
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function get_backup_root_status() {
+		$root_path = $this->get_backup_root_path();
+
+		if ( is_wp_error( $root_path ) ) {
+			return array(
+				'path'          => '',
+				'exists'        => false,
+				'writable'      => false,
+				'error_message' => $root_path->get_error_message(),
+			);
+		}
+
+		$exists   = is_dir( $root_path );
+		$writable = $exists ? wp_is_writable( $root_path ) : wp_is_writable( dirname( $root_path ) );
+
+		return array(
+			'path'          => $root_path,
+			'exists'        => $exists,
+			'writable'      => $writable,
+			'error_message' => '',
+		);
+	}
+
+	/**
+	 * Ensure the backup root exists and is writable.
+	 *
+	 * @return string|WP_Error
+	 */
+	public function ensure_backup_root_exists() {
+		$root_path = $this->get_backup_root_path();
+
+		if ( is_wp_error( $root_path ) ) {
+			return $root_path;
+		}
+
+		if ( ! is_dir( $root_path ) && ! wp_mkdir_p( $root_path ) ) {
+			return new WP_Error(
+				'github_theme_updater_backup_dir_create_failed',
+				sprintf(
+					/* translators: %s: Backup directory path. */
+					__( 'Could not create the backup directory at %s.', 'github-theme-updater' ),
+					$root_path
+				)
+			);
+		}
+
+		if ( ! is_dir( $root_path ) ) {
+			return new WP_Error(
+				'github_theme_updater_backup_dir_missing',
+				sprintf(
+					/* translators: %s: Backup directory path. */
+					__( 'The backup directory is not available at %s.', 'github-theme-updater' ),
+					$root_path
+				)
+			);
+		}
+
+		if ( ! wp_is_writable( $root_path ) ) {
+			return new WP_Error(
+				'github_theme_updater_backup_dir_not_writable',
+				sprintf(
+					/* translators: %s: Backup directory path. */
+					__( 'The backup directory is not writable: %s', 'github-theme-updater' ),
+					$root_path
+				)
+			);
+		}
+
+		return $root_path;
+	}
+
+	/**
+	 * Get the backup directory for one theme stylesheet.
+	 *
+	 * @param string $stylesheet Theme stylesheet.
+	 * @return string|WP_Error
+	 */
+	public function get_theme_backup_path( $stylesheet ) {
+		$stylesheet = sanitize_key( $stylesheet );
+
+		if ( '' === $stylesheet ) {
+			return new WP_Error(
+				'github_theme_updater_missing_backup_stylesheet',
+				__( 'The backup path could not be resolved because the theme directory is missing.', 'github-theme-updater' )
+			);
+		}
+
+		$root_path = $this->get_backup_root_path();
+		if ( is_wp_error( $root_path ) ) {
+			return $root_path;
+		}
+
+		return trailingslashit( $root_path ) . self::BACKUP_THEME_DIRECTORY . '/' . $stylesheet;
+	}
+
+	/**
+	 * Get backup details for one theme stylesheet.
+	 *
+	 * @param string $stylesheet Theme stylesheet.
+	 * @return array<string, mixed>
+	 */
+	public function get_theme_backup_details( $stylesheet ) {
+		$backup_path = $this->get_theme_backup_path( $stylesheet );
+
+		if ( is_wp_error( $backup_path ) ) {
+			return array(
+				'path'          => '',
+				'exists'        => false,
+				'modified'      => 0,
+				'error_message' => $backup_path->get_error_message(),
+			);
+		}
+
+		return array(
+			'path'          => $backup_path,
+			'exists'        => is_dir( $backup_path ),
+			'modified'      => is_dir( $backup_path ) && false !== filemtime( $backup_path ) ? (int) filemtime( $backup_path ) : 0,
+			'error_message' => '',
+		);
+	}
+
+	/**
 	 * Sanitize one theme config row.
 	 *
 	 * @param array<string, mixed>  $input    Raw input.
@@ -303,10 +471,9 @@ class Settings {
 			);
 		}
 
-		$selected_stylesheet           = isset( $input['theme_stylesheet_select'] ) ? sanitize_key( wp_unslash( $input['theme_stylesheet_select'] ) ) : '';
-		$custom_stylesheet             = isset( $input['theme_stylesheet_custom'] ) ? sanitize_key( wp_unslash( $input['theme_stylesheet_custom'] ) ) : '';
-
-		$resolved_stylesheet                  = '' !== $selected_stylesheet ? $selected_stylesheet : $custom_stylesheet;
+		$selected_stylesheet = isset( $input['theme_stylesheet_select'] ) ? sanitize_key( wp_unslash( $input['theme_stylesheet_select'] ) ) : '';
+		$custom_stylesheet   = isset( $input['theme_stylesheet_custom'] ) ? sanitize_key( wp_unslash( $input['theme_stylesheet_custom'] ) ) : '';
+		$resolved_stylesheet = '' !== $selected_stylesheet ? $selected_stylesheet : $custom_stylesheet;
 
 		if ( '' === $resolved_stylesheet && ! empty( $existing['theme_stylesheet'] ) ) {
 			$resolved_stylesheet = sanitize_key( $existing['theme_stylesheet'] );
