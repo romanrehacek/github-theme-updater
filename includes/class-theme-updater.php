@@ -740,7 +740,6 @@ class Theme_Updater {
 				return;
 			}
 		}
-
 	}
 
 	/**
@@ -936,8 +935,8 @@ class Theme_Updater {
 	/**
 	 * Append backup restore details to an existing error.
 	 *
-	 * @param WP_Error $error          Original error.
-	 * @param WP_Error $restore_error  Backup restore error.
+	 * @param WP_Error $error         Original error.
+	 * @param WP_Error $restore_error Backup restore error.
 	 * @return WP_Error
 	 */
 	protected function append_restore_error( WP_Error $error, WP_Error $restore_error ) {
