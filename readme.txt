@@ -24,7 +24,9 @@ Features in this first version:
 * downloads update packages from GitHub,
 * supports private repositories with a GitHub token per configured theme,
 * installs a theme from GitHub before it exists on the site yet,
-* adds manual force-update actions that reinstall a selected configured theme from GitHub even when the version did not increase.
+* adds manual force-update actions that reinstall a selected configured theme from GitHub even when the version did not increase,
+* stores one saved backup per configured theme in `wp-content/uploads/github-theme-updater/` before install or update,
+* restores a theme from its saved backup, including the preserved `.git` directory.
 
 The plugin is designed to stay as close as possible to the standard WordPress upgrade process by using `Theme_Upgrader` instead of custom file copy logic.
 
@@ -32,12 +34,14 @@ The plugin is designed to stay as close as possible to the standard WordPress up
 
 1. Upload the plugin to `/wp-content/plugins/github-theme-updater/`.
 2. Activate the plugin in **Plugins**.
-3. Open **Settings > GitHub Theme Updater**.
+3. Open **Appearance > GitHub Theme Updater**.
 4. Add one or more theme configurations.
 5. For each configuration, either select an already installed theme or leave it unselected for a first-time install.
 6. Enter the matching GitHub repository URL, branch or tag, and add a GitHub token when the repository is private.
 7. Optionally set a target theme directory when the theme is not installed yet; otherwise the plugin will derive it from the remote theme metadata or repository name.
-8. Save the settings and use **Install from GitHub** for new themes, or **Check for updates now** / **Force update from GitHub** for already installed themes.
+8. Review the backup directory status in the plugin settings and confirm that `wp-content/uploads/github-theme-updater/` is writable when backups are enabled.
+9. Save the settings and use **Install from GitHub** for new themes, or **Check now** / **Force update** for already installed themes.
+10. Use **Restore backup** whenever you need to replace the installed theme with the latest saved backup snapshot.
 
 == Frequently Asked Questions ==
 
@@ -60,6 +64,10 @@ Yes. Provide a GitHub token with repository contents read access.
 = Does force update still use WordPress core? =
 
 Yes. The plugin forces the selected configured theme through WordPress's native theme upgrader flow instead of copying files directly.
+
+= Where are backups stored? =
+
+The plugin stores one latest backup per configured theme in `wp-content/uploads/github-theme-updater/`. The admin page shows the full path, whether the directory is writable, and whether backups are currently enabled.
 
 == Changelog ==
 
